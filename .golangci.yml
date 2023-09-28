@@ -1,0 +1,29 @@
+run:
+  go: "1.21"
+  deadline: 2m
+linters:
+  enable-all: true
+  disable:
+    # deprecated
+    - golint
+    - exhaustivestruct
+    - maligned
+    - interfacer
+    - scopelint
+    - ifshort
+    - varcheck
+    - structcheck
+    - deadcode
+    - nosnakecase
+    # ugly
+    - varnamelen
+    - tagalign
+    # local
+    - gosec
+    - depguard
+    - testpackage
+    - paralleltest
+linters-settings:
+  misspell:
+    locale: US
+  nlreturn:

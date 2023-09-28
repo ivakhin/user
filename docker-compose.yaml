@@ -1,0 +1,44 @@
+version: '3.9'
+
+services:
+  mongo-replica-set:
+    image: percona/percona-server-mongodb:6.0-multi
+    container_name: mongo-rs
+    hostname: mongo-rs
+    ports:
+      - "127.0.0.1:27017:27017"
+    restart: no
+    entrypoint: [ "/bin/bash", "-c", "/opt/init-replica-set.sh" ]
+    volumes:
+      - ./init-replica-set.sh:/opt/init-replica-set.sh
+    command:
+      - "--noauth"
+      - "--bind_ip_all"
+      - "--storageEngine"
+      - "wiredTiger"
+      - "--wiredTigerCacheSizeGB"
+      - "2"
+      - "--replSet"
+      - "rs0"
+
+  mongo-wired-tiger:
+    image: percona/percona-server-mongodb:6.0-multi
+    container_name: mongo-wt
+    hostname: mongo-wt
+    ports:
+      - "127.0.0.1:27018:27017"
+    restart: no
+    entrypoint: "/usr/bin/mongod"
+    command:
+      - "--noauth"
+      - "--bind_ip_all"
+      - "--storageEngine"
+      - "wiredTiger"
+      - "--wiredTigerCacheSizeGB"
+      - "2"
+
+  redis:
+    image: redis:7.2
+    container_name: redis
+    ports:
+      - 127.0.0.1:6379:6379
