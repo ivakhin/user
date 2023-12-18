@@ -14,11 +14,12 @@ import (
 var ErrNotFound = errors.New("user not found")
 
 type RepoMongoDBCached struct {
-	Collection *mongo.Collection
-	mu         sync.RWMutex
-	store      map[int]User
-	errHandler func(context.Context, error)
-	err        error
+	Collection       *mongo.Collection
+	mu               sync.RWMutex
+	store            map[int]User
+	decodeErrHandler func(context.Context, error)
+	err              error
+	closeFn          func()
 }
 
 func (r *RepoMongoDBCached) Read(_ context.Context, id int) (User, error) {
@@ -30,7 +31,6 @@ func (r *RepoMongoDBCached) Read(_ context.Context, id int) (User, error) {
 	}
 
 	user, ok := r.store[id]
-
 	if !ok {
 		return user, ErrNotFound
 	}
@@ -60,24 +60,18 @@ func NewRepoMongoDBCached(
 	collection *mongo.Collection,
 	errHandler func(context.Context, error),
 ) (*RepoMongoDBCached, error) {
-	if errHandler == nil {
-		errHandler = func(ctx context.Context, err error) {}
-	}
-
-	r := &RepoMongoDBCached{
-		Collection: collection,
-		mu:         sync.RWMutex{},
-		store:      nil,
-		errHandler: errHandler,
-		err:        nil,
-	}
-
-	count, err := r.Collection.CountDocuments(ctx, bson.M{}, options.Count())
+	count, err := collection.CountDocuments(ctx, bson.M{}, options.Count())
 	if err != nil {
 		return nil, fmt.Errorf("get users count: %w", err)
 	}
 
-	r.store = make(map[int]User, count)
+	r := &RepoMongoDBCached{
+		Collection:       collection,
+		mu:               sync.RWMutex{},
+		store:            make(map[int]User, count),
+		decodeErrHandler: errHandler,
+		err:              nil,
+	}
 
 	go r.watch(ctx)
 
@@ -95,54 +89,45 @@ func (r *RepoMongoDBCached) Healthcheck() error {
 	return r.err
 }
 
+func (r *RepoMongoDBCached) Close() {
+	r.closeFn()
+}
+
+//nolint:nlreturn
 func (r *RepoMongoDBCached) watch(ctx context.Context) {
-	var (
-		resumeToken interface{}
-		msg         message
-	)
+	var msg message
+
+	ctx, r.closeFn = context.WithCancel(ctx)
 
 	for {
-		select {
-		case <-ctx.Done():
-			r.setErr(ctx.Err())
+		opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
 
-			return
-		default:
-			opts := options.ChangeStream().
-				SetFullDocument(options.UpdateLookup).
-				SetStartAfter(resumeToken)
-
-			stream, err := r.Collection.Watch(ctx, mongo.Pipeline{}, opts)
+		stream, err := r.Collection.Watch(ctx, mongo.Pipeline{}, opts)
+		if err != nil {
 			r.setErr(err)
+			break
+		}
 
+		for stream.Next(ctx) {
+			if err := stream.Err(); err != nil {
+				r.setErr(err)
+				break
+			}
+
+			err := stream.Decode(&msg)
 			if err != nil {
+				r.handleDecodeErr(ctx, err)
 				continue
 			}
 
-			for stream.Next(ctx) {
-				if err = stream.Err(); err != nil {
-					r.setErr(err)
-
-					break
-				}
-
-				err = stream.Decode(&msg)
-				if err != nil {
-					r.errHandler(ctx, err)
-
-					continue
-				}
-
-				switch msg.Type {
-				case operationTypeInsert, operationTypeReplace, operationTypeUpdate:
-					r.set(msg.Doc)
-				case operationTypeDelete:
-					r.delete(msg.Doc.ID)
-				}
-
-				msg = message{} //nolint:exhaustruct
-				resumeToken = stream.ResumeToken()
+			switch msg.Type {
+			case operationTypeInsert, operationTypeReplace, operationTypeUpdate:
+				r.set(msg.Doc)
+			case operationTypeDelete:
+				r.delete(msg.Doc.ID)
 			}
+
+			msg = message{} //nolint:exhaustruct
 		}
 	}
 }
@@ -161,7 +146,9 @@ func (r *RepoMongoDBCached) setAll(ctx context.Context) error {
 		}
 
 		if err := cur.Decode(&user); err != nil {
-			r.errHandler(ctx, err)
+			r.decodeErrHandler(ctx, err)
+
+			continue
 		}
 
 		r.set(user)
@@ -187,4 +174,10 @@ func (r *RepoMongoDBCached) setErr(err error) {
 	r.mu.Lock()
 	r.err = err
 	r.mu.Unlock()
+}
+
+func (r *RepoMongoDBCached) handleDecodeErr(ctx context.Context, err error) {
+	if r.decodeErrHandler != nil {
+		r.decodeErrHandler(ctx, err)
+	}
 }
